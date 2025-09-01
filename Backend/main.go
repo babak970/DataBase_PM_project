@@ -165,6 +165,8 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var totalUsers int
 	var newUsers int
+	var purchasesToday int
+	var purchasesMonthSum int
 	type NameLengthStat struct {
 		Length int `json:"length"`
 		Count  int `json:"count"`
@@ -177,10 +179,21 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If you have a created_at column in users table
 	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '30 days'").Scan(&newUsers)
 	if err != nil {
 		newUsers = -1
+	}
+
+	// Purchases made today
+	err = db.QueryRow("SELECT COUNT(*) FROM purchases WHERE purchased_at::date = CURRENT_DATE").Scan(&purchasesToday)
+	if err != nil {
+		purchasesToday = -1
+	}
+
+	// Sum of purchases this month
+	err = db.QueryRow("SELECT COALESCE(SUM(product_price), 0) FROM purchases WHERE DATE_TRUNC('month', purchased_at) = DATE_TRUNC('month', CURRENT_DATE)").Scan(&purchasesMonthSum)
+	if err != nil {
+		purchasesMonthSum = -1
 	}
 
 	rows, err := db.Query(`
@@ -201,8 +214,10 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_users":      totalUsers,
-		"new_users_30days": newUsers,
-		"top_name_lengths": nameLengthStats,
+		"total_users":         totalUsers,
+		"new_users_30days":    newUsers,
+		"purchases_today":     purchasesToday,
+		"purchases_month_sum": purchasesMonthSum,
+		"top_name_lengths":    nameLengthStats,
 	})
 }
