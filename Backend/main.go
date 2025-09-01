@@ -3,30 +3,34 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 	_ "github.com/lib/pq"
+	"github.com/rs/cors"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// User struct defines the data model for a user in our system.
 type User struct {
 	ID          int    `json:"id"`
 	Name        string `json:"name"`
 	PhoneNumber string `json:"phone_number"`
-	Password    string `json:"password"` // This will be the hashed password
+	Password    string `json:"password"`
 }
 
-// Global variable to hold the database connection.
+type Purchase struct {
+	UserID       int    `json:"user_id"`
+	ProductID    int    `json:"product_id"`
+	ProductName  string `json:"product_name"`
+	ProductPrice int    `json:"product_price"`
+}
+
 var db *sql.DB
 
 func main() {
-	// 1. Connect to the database.
 	var err error
-	connStr := "your-database-connection-string" // REPLACE WITH YOUR ACTUAL CONNECTION STRING
+	connStr := "postgres://postgres:babak@localhost:5432/DB_PM_project?sslmode=disable"
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
@@ -37,65 +41,51 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("Successfully connected to the database!")
+	log.Println("Successfully connected to the database!")
 
-	// 2. Set up the router and API endpoints.
 	router := mux.NewRouter()
-
-	// Handle CORS preflight requests
-	router.Methods("OPTIONS").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.WriteHeader(http.StatusOK)
-	})
-
 	router.HandleFunc("/register", registerHandler).Methods("POST")
 	router.HandleFunc("/login", loginHandler).Methods("POST")
-	http.Handle("/", router)
+	router.HandleFunc("/users", getUsersHandler).Methods("GET")
+	router.HandleFunc("/buy", buyHandler).Methods("POST")
+	router.HandleFunc("/admin/stats", adminStatsHandler).Methods("GET")
 
-	// 3. Start the server.
+	c := cors.New(cors.Options{
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders: []string{"*"},
+	})
+
+	handler := c.Handler(router)
+
 	log.Println("Server is running on port 8080...")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8080", handler))
 }
 
-// registerHandler handles new user registration requests.
 func registerHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Content-Type", "application/json")
-
 	var user User
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	// Hash the password for security.
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		http.Error(w, "Failed to hash password", http.StatusInternalServerError)
 		return
 	}
-
-	// Insert the new user into the database.
 	_, err = db.Exec("INSERT INTO users (name, phone_number, password) VALUES ($1, $2, $3)", user.Name, user.PhoneNumber, string(hashedPassword))
 	if err != nil {
 		http.Error(w, "Failed to register user. Phone number might already exist.", http.StatusInternalServerError)
 		return
 	}
-
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"message": "User registered successfully!"})
 }
 
-// loginHandler handles user login requests.
 func loginHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 	w.Header().Set("Content-Type", "application/json")
-
 	var credentials struct {
 		PhoneNumber string `json:"phone_number"`
 		Password    string `json:"password"`
@@ -105,9 +95,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
+	if credentials.PhoneNumber == "admin" && credentials.Password == "adminpass" {
+		json.NewEncoder(w).Encode(map[string]string{"message": "Admin login successful!", "role": "admin"})
+		return
+	}
 	var user User
-	// Query the database for the user by their phone number.
 	err = db.QueryRow("SELECT id, name, phone_number, password FROM users WHERE phone_number = $1", credentials.PhoneNumber).Scan(&user.ID, &user.Name, &user.PhoneNumber, &user.Password)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -117,14 +109,100 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Server error", http.StatusInternalServerError)
 		return
 	}
-
-	// Compare the provided password with the hashed password from the database.
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(credentials.Password))
 	if err != nil {
 		http.Error(w, "Invalid phone number or password", http.StatusUnauthorized)
 		return
 	}
-
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"message": "Login successful!"})
+}
+
+func getUsersHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query("SELECT id, name, phone_number FROM users ORDER BY name ASC")
+	if err != nil {
+		http.Error(w, "Failed to retrieve users", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var users []User
+	for rows.Next() {
+		var user User
+		if err := rows.Scan(&user.ID, &user.Name, &user.PhoneNumber); err != nil {
+			http.Error(w, "Failed to scan user data", http.StatusInternalServerError)
+			return
+		}
+		users = append(users, user)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Error iterating over user rows", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(users)
+}
+
+func buyHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var purchase Purchase
+	err := json.NewDecoder(r.Body).Decode(&purchase)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	_, err = db.Exec(
+		"INSERT INTO purchases (user_id, product_id, product_name, product_price) VALUES ($1, $2, $3, $4)",
+		purchase.UserID, purchase.ProductID, purchase.ProductName, purchase.ProductPrice,
+	)
+	if err != nil {
+		http.Error(w, "Failed to record purchase", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"message": "Purchase recorded successfully!"})
+}
+
+func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var totalUsers int
+	var newUsers int
+	type NameLengthStat struct {
+		Length int `json:"length"`
+		Count  int `json:"count"`
+	}
+	var nameLengthStats []NameLengthStat
+
+	err := db.QueryRow("SELECT COUNT(*) FROM users").Scan(&totalUsers)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to get total users"})
+		return
+	}
+
+	// If you have a created_at column in users table
+	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '30 days'").Scan(&newUsers)
+	if err != nil {
+		newUsers = -1
+	}
+
+	rows, err := db.Query(`
+        SELECT LENGTH(name) AS length, COUNT(*) AS count
+        FROM users
+        GROUP BY length
+        ORDER BY count DESC
+        LIMIT 5
+    `)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var stat NameLengthStat
+			if err := rows.Scan(&stat.Length, &stat.Count); err == nil {
+				nameLengthStats = append(nameLengthStats, stat)
+			}
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total_users":      totalUsers,
+		"new_users_30days": newUsers,
+		"top_name_lengths": nameLengthStats,
+	})
 }
