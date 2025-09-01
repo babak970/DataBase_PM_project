@@ -163,40 +163,115 @@ func buyHandler(w http.ResponseWriter, r *http.Request) {
 
 func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	var totalUsers int
-	var newUsers int
-	var purchasesToday int
-	var purchasesMonthSum int
+	var totalUsers, newUsers, purchasesToday, purchasesMonthSum int
+
+	// Active users in last 7 days
+	var activeUsers7Days int
+
+	// Most purchased product
+	var mostPurchasedProduct string
+	var mostPurchasedProductCount int
+
+	// Top products by revenue
+	type ProductRevenue struct {
+		Name    string `json:"name"`
+		Revenue int    `json:"revenue"`
+	}
+	var topProductsRevenue []ProductRevenue
+
+	// Top users by total spent
+	type UserSpent struct {
+		Name  string `json:"name"`
+		Spent int    `json:"spent"`
+	}
+	var topUsersSpent []UserSpent
+
+	// Users above average purchases
+	type UserPurchases struct {
+		UserID         int `json:"user_id"`
+		TotalPurchases int `json:"total_purchases"`
+	}
+	var aboveAvgPurchases []UserPurchases
+
 	type NameLengthStat struct {
 		Length int `json:"length"`
 		Count  int `json:"count"`
 	}
 	var nameLengthStats []NameLengthStat
 
-	err := db.QueryRow("SELECT COUNT(*) FROM users").Scan(&totalUsers)
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to get total users"})
-		return
-	}
+	// Existing stats
+	db.QueryRow("SELECT COUNT(*) FROM users").Scan(&totalUsers)
+	db.QueryRow("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '30 days'").Scan(&newUsers)
+	db.QueryRow("SELECT COUNT(*) FROM purchases WHERE purchased_at::date = CURRENT_DATE").Scan(&purchasesToday)
+	db.QueryRow("SELECT COALESCE(SUM(product_price), 0) FROM purchases WHERE DATE_TRUNC('month', purchased_at) = DATE_TRUNC('month', CURRENT_DATE)").Scan(&purchasesMonthSum)
 
-	err = db.QueryRow("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '30 days'").Scan(&newUsers)
-	if err != nil {
-		newUsers = -1
-	}
+	// Active users in last 7 days
+	db.QueryRow("SELECT COUNT(DISTINCT user_id) FROM purchases WHERE purchased_at >= NOW() - INTERVAL '7 days'").Scan(&activeUsers7Days)
 
-	// Purchases made today
-	err = db.QueryRow("SELECT COUNT(*) FROM purchases WHERE purchased_at::date = CURRENT_DATE").Scan(&purchasesToday)
-	if err != nil {
-		purchasesToday = -1
-	}
-
-	// Sum of purchases this month
-	err = db.QueryRow("SELECT COALESCE(SUM(product_price), 0) FROM purchases WHERE DATE_TRUNC('month', purchased_at) = DATE_TRUNC('month', CURRENT_DATE)").Scan(&purchasesMonthSum)
-	if err != nil {
-		purchasesMonthSum = -1
-	}
-
+	// Users above average purchases
 	rows, err := db.Query(`
+        SELECT user_id, COUNT(*) AS total_purchases
+        FROM purchases
+        GROUP BY user_id
+        HAVING COUNT(*) > (SELECT AVG(purchase_count) FROM (SELECT COUNT(*) AS purchase_count FROM purchases GROUP BY user_id) AS subquery)
+    `)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var up UserPurchases
+			if err := rows.Scan(&up.UserID, &up.TotalPurchases); err == nil {
+				aboveAvgPurchases = append(aboveAvgPurchases, up)
+			}
+		}
+	}
+
+	// Most purchased product
+	db.QueryRow(`
+        SELECT product_name, COUNT(*) AS purchase_count
+        FROM purchases
+        GROUP BY product_name
+        ORDER BY purchase_count DESC
+        LIMIT 1
+    `).Scan(&mostPurchasedProduct, &mostPurchasedProductCount)
+
+	// Top products by revenue
+	rows, err = db.Query(`
+        SELECT product_name, SUM(product_price) AS total_revenue
+        FROM purchases
+        GROUP BY product_name
+        ORDER BY total_revenue DESC
+    `)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var pr ProductRevenue
+			if err := rows.Scan(&pr.Name, &pr.Revenue); err == nil {
+				topProductsRevenue = append(topProductsRevenue, pr)
+			}
+		}
+	}
+
+	// Top users by total spent
+	rows, err = db.Query(`
+        SELECT u.name, SUM(p.product_price) AS total_spent
+        FROM users u
+        JOIN purchases p ON u.id = p.user_id
+        GROUP BY u.id
+        ORDER BY total_spent DESC
+        LIMIT 5
+    `)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var us UserSpent
+			if err := rows.Scan(&us.Name, &us.Spent); err == nil {
+				topUsersSpent = append(topUsersSpent, us)
+			}
+		}
+	}
+
+	// Top 5 name lengths
+	rows, err = db.Query(`
         SELECT LENGTH(name) AS length, COUNT(*) AS count
         FROM users
         GROUP BY length
@@ -218,6 +293,14 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 		"new_users_30days":    newUsers,
 		"purchases_today":     purchasesToday,
 		"purchases_month_sum": purchasesMonthSum,
-		"top_name_lengths":    nameLengthStats,
+		"active_users_7days":  activeUsers7Days,
+		"above_avg_purchases": aboveAvgPurchases,
+		"most_purchased_product": map[string]interface{}{
+			"name":  mostPurchasedProduct,
+			"count": mostPurchasedProductCount,
+		},
+		"top_products_revenue": topProductsRevenue,
+		"top_users_spent":      topUsersSpent,
+		"top_name_lengths":     nameLengthStats,
 	})
 }
